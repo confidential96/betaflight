@@ -3,7 +3,7 @@ FEATURES       += SDCARD VCP
 
 TARGET_SRC = \
             drivers/accgyro/accgyro_fake.c \
-            drivers/accgyro/accgyro_mpu6050.c \
+            drivers/accgyro/accgyro_spi_mpu9250.c \
             drivers/barometer/barometer_fake.c \
             drivers/barometer/barometer_ms5611.c \
             drivers/compass/compass_fake.c \
