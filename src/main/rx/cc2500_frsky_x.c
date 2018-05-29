@@ -28,6 +28,9 @@
 #include "build/build_config.h"
 #include "build/debug.h"
 
+#include "pg/rx.h"
+#include "pg/rx_spi.h"
+
 #include "common/maths.h"
 #include "common/utils.h"
 

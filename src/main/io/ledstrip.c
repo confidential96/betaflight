@@ -24,7 +24,7 @@
 #include <string.h>
 #include <stdarg.h>
 
-#include <platform.h>
+#include "platform.h"
 
 #ifdef USE_LED_STRIP
 
@@ -40,6 +40,7 @@
 #include "config/feature.h"
 #include "pg/pg.h"
 #include "pg/pg_ids.h"
+#include "pg/rx.h"
 
 #include "drivers/light_ws2811strip.h"
 #include "drivers/serial.h"

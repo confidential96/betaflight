@@ -16,7 +16,6 @@ COMMON_SRC = \
             drivers/bus_spi.c \
             drivers/bus_spi_config.c \
             drivers/bus_spi_pinconfig.c \
-            drivers/bus_spi_soft.c \
             drivers/buttons.c \
             drivers/display.c \
             drivers/exti.c \
@@ -82,6 +81,7 @@ FC_SRC = \
             fc/rc_modes.c \
             flight/position.c \
             flight/failsafe.c \
+            flight/gps_rescue.c \
             flight/imu.c \
             flight/mixer.c \
             flight/mixer_tricopter.c \
@@ -195,22 +195,22 @@ SPEED_OPTIMISED_SRC := $(SPEED_OPTIMISED_SRC) \
             common/filter.c \
             common/maths.c \
             common/typeconversion.c \
-            drivers/accgyro/accgyro_adxl345.c \
-            drivers/accgyro/accgyro_bma280.c \
             drivers/accgyro/accgyro_fake.c \
-            drivers/accgyro/accgyro_l3g4200d.c \
-            drivers/accgyro/accgyro_l3gd20.c \
-            drivers/accgyro/accgyro_lsm303dlhc.c \
-            drivers/accgyro/accgyro_mma845x.c \
+            drivers/accgyro/accgyro_mpu.c \
             drivers/accgyro/accgyro_mpu3050.c \
             drivers/accgyro/accgyro_mpu6050.c \
             drivers/accgyro/accgyro_mpu6500.c \
-            drivers/accgyro/accgyro_mpu.c \
             drivers/accgyro/accgyro_spi_bmi160.c \
             drivers/accgyro/accgyro_spi_icm20689.c \
             drivers/accgyro/accgyro_spi_mpu6000.c \
             drivers/accgyro/accgyro_spi_mpu6500.c \
             drivers/accgyro/accgyro_spi_mpu9250.c \
+            drivers/accgyro_legacy/accgyro_adxl345.c \
+            drivers/accgyro_legacy/accgyro_bma280.c \
+            drivers/accgyro_legacy/accgyro_l3g4200d.c \
+            drivers/accgyro_legacy/accgyro_l3gd20.c \
+            drivers/accgyro_legacy/accgyro_lsm303dlhc.c \
+            drivers/accgyro_legacy/accgyro_mma845x.c \
             drivers/adc.c \
             drivers/buf_writer.c \
             drivers/bus.c \
@@ -256,6 +256,7 @@ SIZE_OPTIMISED_SRC := $(SIZE_OPTIMISED_SRC) \
             drivers/barometer/barometer_fake.c \
             drivers/barometer/barometer_ms5611.c \
             drivers/barometer/barometer_lps.c \
+            drivers/barometer/barometer_qmp6988.c \
             drivers/bus_i2c_config.c \
             drivers/bus_spi_config.c \
             drivers/bus_spi_pinconfig.c \

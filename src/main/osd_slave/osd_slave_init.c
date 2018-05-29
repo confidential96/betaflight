@@ -65,9 +65,6 @@
 
 #include "msp/msp_serial.h"
 
-#include "rx/rx.h"
-#include "rx/spektrum.h"
-
 #include "io/beeper.h"
 #include "io/displayport_max7456.h"
 #include "io/flashfs.h"
@@ -123,20 +120,6 @@ static IO_t busSwitchResetPin        = IO_NONE;
 }
 #endif
 
-
-#ifdef USE_SPI
-// Pre-initialize all CS pins to input with pull-up.
-// It's sad that we can't do this with an initialized array,
-// since we will be taking care of configurable CS pins shortly.
-
-void spiPreInit(void)
-{
-#ifdef USE_MAX7456
-    spiPreInitCs(IO_TAG(MAX7456_SPI_CS_PIN));
-#endif
-}
-#endif
-
 void init(void)
 {
 #ifdef USE_HAL_DRIVER
@@ -156,7 +139,7 @@ void init(void)
 
     initEEPROM();
 
-    ensureEEPROMContainsValidData();
+    ensureEEPROMStructureIsValid();
     readEEPROM();
 
     systemState |= SYSTEM_STATE_CONFIG_LOADED;
@@ -204,7 +187,7 @@ void init(void)
 #else
 
 #ifdef USE_SPI
-    spiPinConfigure(spiPinConfig());
+    spiPinConfigure(spiPinConfig(0));
 
     // Initialize CS lines and keep them high
     spiPreInit();
@@ -224,7 +207,7 @@ void init(void)
 #endif /* USE_SPI */
 
 #ifdef USE_I2C
-    i2cHardwareConfigure(i2cConfig());
+    i2cHardwareConfigure(i2cConfig(0));
 
     // Note: Unlike UARTs which are configured when client is present,
     // I2C buses are initialized unconditionally if they are configured.

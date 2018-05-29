@@ -52,6 +52,7 @@
 
 #include "flight/imu.h"
 #include "flight/pid.h"
+#include "flight/gps_rescue.h"
 
 #include "sensors/sensors.h"
 
@@ -1326,6 +1327,10 @@ void onGpsNewData(void)
     GPS_calculateDistanceAndDirectionToHome();
     // calculate the current velocity based on gps coordinates continously to get a valid speed at the moment when we start navigating
     GPS_calc_velocity();
+
+#ifdef USE_GPS_RESCUE
+    rescueNewGpsData();
+#endif
 }
 
 #endif

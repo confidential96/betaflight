@@ -98,7 +98,7 @@ typedef struct pidProfile_s {
     uint16_t itermThrottleThreshold;        // max allowed throttle delta before iterm accelerated in ms
     uint16_t itermAcceleratorGain;          // Iterm Accelerator Gain when itermThrottlethreshold is hit
     uint8_t setpointRelaxRatio;             // Setpoint weight relaxation effect
-    uint8_t dtermSetpointWeight;            // Setpoint weight for Dterm (0= measurement, 1= full error, 1 > aggressive derivative)
+    uint16_t dtermSetpointWeight;            // Setpoint weight for Dterm (0= measurement, 1= full error, 1 > aggressive derivative)
     uint16_t yawRateAccelLimit;             // yaw accel limiter for deg/sec/ms
     uint16_t rateAccelLimit;                // accel limiter roll/pitch deg/sec/ms
     uint16_t crash_dthreshold;              // dterm crash value
@@ -114,7 +114,8 @@ typedef struct pidProfile_s {
     uint16_t dterm_lowpass2_hz;                // Extra PT1 Filter on D in hz
     uint8_t throttle_boost;                 // how much should throttle be boosted during transient changes 0-100, 100 adds 10x hpf filtered throttle
     uint8_t throttle_boost_cutoff;          // Which cutoff frequency to use for throttle boost. higher cutoffs keep the boost on for shorter. Specified in hz.
-    uint8_t  iterm_rotation;                    // rotates iterm to translate world errors to local coordinate system
+    uint8_t  iterm_rotation;                // rotates iterm to translate world errors to local coordinate system
+    uint8_t  smart_feedforward;             // takes only the larger of P and the D weight feed forward term if they have the same sign.
 } pidProfile_t;
 
 #ifndef USE_OSD_SLAVE

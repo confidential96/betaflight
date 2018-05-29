@@ -42,8 +42,11 @@
 
 #include "flight/failsafe.h"
 #include "flight/imu.h"
+#include "flight/gps_rescue.h"
 #include "flight/pid.h"
+#include "pg/rx.h"
 #include "rx/rx.h"
+
 
 #include "sensors/battery.h"
 
@@ -179,7 +182,7 @@ static void checkForThrottleErrorResetState(uint16_t rxRefreshRate)
     }
 }
 
-FAST_CODE NOINLINE void processRcCommand(void)
+FAST_CODE FAST_CODE_NOINLINE void processRcCommand(void)
 {
     static float rcCommandInterp[4];
     static float rcStepSize[4];
@@ -265,7 +268,7 @@ FAST_CODE NOINLINE void processRcCommand(void)
     }
 }
 
-FAST_CODE NOINLINE void updateRcCommands(void)
+FAST_CODE FAST_CODE_NOINLINE void updateRcCommands(void)
 {
     // PITCH & ROLL only dynamic PID adjustment,  depending on throttle value
     int32_t prop;
@@ -343,7 +346,7 @@ FAST_CODE NOINLINE void updateRcCommands(void)
 
         rcCommandBuff.X = rcCommand[ROLL];
         rcCommandBuff.Y = rcCommand[PITCH];
-        if ((!FLIGHT_MODE(ANGLE_MODE)&&(!FLIGHT_MODE(HORIZON_MODE)))) {
+        if ((!FLIGHT_MODE(ANGLE_MODE) && (!FLIGHT_MODE(HORIZON_MODE)) && (!FLIGHT_MODE(GPS_RESCUE_MODE)))) {
             rcCommandBuff.Z = rcCommand[YAW];
         } else {
             rcCommandBuff.Z = 0;
@@ -351,9 +354,13 @@ FAST_CODE NOINLINE void updateRcCommands(void)
         imuQuaternionHeadfreeTransformVectorEarthToBody(&rcCommandBuff);
         rcCommand[ROLL] = rcCommandBuff.X;
         rcCommand[PITCH] = rcCommandBuff.Y;
-        if ((!FLIGHT_MODE(ANGLE_MODE)&&(!FLIGHT_MODE(HORIZON_MODE)))) {
+        if ((!FLIGHT_MODE(ANGLE_MODE)&&(!FLIGHT_MODE(HORIZON_MODE)) && (!FLIGHT_MODE(GPS_RESCUE_MODE)))) {
             rcCommand[YAW] = rcCommandBuff.Z;
         }
+    }
+
+    if (FLIGHT_MODE(GPS_RESCUE_MODE)) {
+        rcCommand[THROTTLE] = rescueThrottle;
     }
 }
 

@@ -44,6 +44,8 @@
 #include "pg/pg.h"
 #include "pg/pg_ids.h"
 #include "pg/beeper.h"
+#include "pg/rx.h"
+#include "pg/rx_spi.h"
 
 #include "drivers/accgyro/accgyro.h"
 #include "drivers/bus_i2c.h"
@@ -1053,9 +1055,15 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
         sbufWriteU8(dst, rxConfig()->rcInterpolation);
         sbufWriteU8(dst, rxConfig()->rcInterpolationInterval);
         sbufWriteU16(dst, rxConfig()->airModeActivateThreshold * 10 + 1000);
-        sbufWriteU8(dst, rxConfig()->rx_spi_protocol);
-        sbufWriteU32(dst, rxConfig()->rx_spi_id);
-        sbufWriteU8(dst, rxConfig()->rx_spi_rf_channel_count);
+#ifdef USE_RX_SPI
+        sbufWriteU8(dst, rxSpiConfig()->rx_spi_protocol);
+        sbufWriteU32(dst, rxSpiConfig()->rx_spi_id);
+        sbufWriteU8(dst, rxSpiConfig()->rx_spi_rf_channel_count);
+#else
+        sbufWriteU8(dst, 0);
+        sbufWriteU32(dst, 0);
+        sbufWriteU8(dst, 0);
+#endif
         sbufWriteU8(dst, rxConfig()->fpvCamAngleDegrees);
         break;
 
@@ -1224,7 +1232,7 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
         sbufWriteU8(dst, 0); // reserved
         sbufWriteU8(dst, currentPidProfile->vbatPidCompensation);
         sbufWriteU8(dst, currentPidProfile->setpointRelaxRatio);
-        sbufWriteU8(dst, currentPidProfile->dtermSetpointWeight);
+        sbufWriteU8(dst, MIN(currentPidProfile->dtermSetpointWeight, 255));
         sbufWriteU8(dst, 0); // reserved
         sbufWriteU8(dst, 0); // reserved
         sbufWriteU8(dst, 0); // reserved
@@ -1234,6 +1242,7 @@ static bool mspProcessOutCommand(uint8_t cmdMSP, sbuf_t *dst)
         sbufWriteU8(dst, 0); // was pidProfile.levelSensitivity
         sbufWriteU16(dst, currentPidProfile->itermThrottleThreshold);
         sbufWriteU16(dst, currentPidProfile->itermAcceleratorGain);
+        sbufWriteU16(dst, currentPidProfile->dtermSetpointWeight);
         break;
 
     case MSP_SENSOR_CONFIG:
@@ -1694,6 +1703,9 @@ static mspResult_e mspProcessInCommand(uint8_t cmdMSP, sbuf_t *src)
             currentPidProfile->itermThrottleThreshold = sbufReadU16(src);
             currentPidProfile->itermAcceleratorGain = sbufReadU16(src);
         }
+        if (sbufBytesRemaining(src) >= 2) {
+            currentPidProfile->dtermSetpointWeight = sbufReadU16(src);
+        }
         pidInitConfig(currentPidProfile);
         break;
 
@@ -1889,9 +1901,15 @@ static mspResult_e mspProcessInCommand(uint8_t cmdMSP, sbuf_t *src)
             rxConfigMutable()->airModeActivateThreshold = (sbufReadU16(src) - 1000) / 10;
         }
         if (sbufBytesRemaining(src) >= 6) {
-            rxConfigMutable()->rx_spi_protocol = sbufReadU8(src);
-            rxConfigMutable()->rx_spi_id = sbufReadU32(src);
-            rxConfigMutable()->rx_spi_rf_channel_count = sbufReadU8(src);
+#ifdef USE_RX_SPI
+            rxSpiConfigMutable()->rx_spi_protocol = sbufReadU8(src);
+            rxSpiConfigMutable()->rx_spi_id = sbufReadU32(src);
+            rxSpiConfigMutable()->rx_spi_rf_channel_count = sbufReadU8(src);
+#else
+            sbufReadU8(src);
+            sbufReadU32(src);
+            sbufReadU8(src);
+#endif
         }
         if (sbufBytesRemaining(src) >= 1) {
             rxConfigMutable()->fpvCamAngleDegrees = sbufReadU8(src);

@@ -21,7 +21,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include <platform.h>
+#include "platform.h"
 
 #include "build/debug.h"
 
@@ -29,6 +29,7 @@
 
 #include "pg/pg.h"
 #include "pg/pg_ids.h"
+#include "pg/rx.h"
 
 #include "drivers/time.h"
 
@@ -123,7 +124,9 @@ static bool failsafeShouldHaveCausedLandingByNow(void)
 static void failsafeActivate(void)
 {
     failsafeState.active = true;
+
     failsafeState.phase = FAILSAFE_LANDING;
+    
     ENABLE_FLIGHT_MODE(FAILSAFE_MODE);
     failsafeState.landingShouldBeFinishedAt = millis() + failsafeConfig()->failsafe_off_delay * MILLIS_PER_TENTH_SECOND;
 
@@ -132,6 +135,12 @@ static void failsafeActivate(void)
 
 static void failsafeApplyControlInput(void)
 {
+    if (failsafeConfig()->failsafe_procedure == FAILSAFE_PROCEDURE_GPS_RESCUE) {
+        ENABLE_FLIGHT_MODE(GPS_RESCUE_MODE);
+
+        return;
+    }
+
     for (int i = 0; i < 3; i++) {
         rcData[i] = rxConfig()->midrc;
     }
@@ -235,7 +244,6 @@ void failsafeUpdateState(void)
                     failsafeState.phase = FAILSAFE_RX_LOSS_RECOVERED;
                 } else {
                     switch (failsafeConfig()->failsafe_procedure) {
-                        default:
                         case FAILSAFE_PROCEDURE_AUTO_LANDING:
                             // Stabilize, and set Throttle to specified level
                             failsafeActivate();
@@ -246,6 +254,11 @@ void failsafeUpdateState(void)
                             failsafeActivate();
                             failsafeState.phase = FAILSAFE_LANDED;      // skip auto-landing procedure
                             failsafeState.receivingRxDataPeriodPreset = PERIOD_OF_3_SECONDS; // require 3 seconds of valid rxData
+                            break;
+                        case FAILSAFE_PROCEDURE_GPS_RESCUE:
+                            failsafeActivate();
+                            failsafeState.phase = FAILSAFE_GPS_RESCUE;
+                            failsafeState.receivingRxDataPeriodPreset = PERIOD_OF_3_SECONDS;
                             break;
                     }
                 }
@@ -267,7 +280,20 @@ void failsafeUpdateState(void)
                     reprocessState = true;
                 }
                 break;
-
+            case FAILSAFE_GPS_RESCUE:
+                if (receivingRxData) {
+                    failsafeState.phase = FAILSAFE_RX_LOSS_RECOVERED;
+                    reprocessState = true;
+                }
+                if (armed) {
+                    failsafeApplyControlInput();
+                    beeperMode = BEEPER_RX_LOST_LANDING;
+                } else {
+                    failsafeState.receivingRxDataPeriodPreset = PERIOD_OF_30_SECONDS; // require 30 seconds of valid rxData
+                    failsafeState.phase = FAILSAFE_LANDED;
+                    reprocessState = true;
+                }
+                break;
             case FAILSAFE_LANDED:
                 setArmingDisabled(ARMING_DISABLED_FAILSAFE); // To prevent accidently rearming by an intermittent rx link
                 disarm();

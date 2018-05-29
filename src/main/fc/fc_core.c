@@ -37,6 +37,7 @@
 #include "config/feature.h"
 #include "pg/pg.h"
 #include "pg/pg_ids.h"
+#include "pg/rx.h"
 
 #include "drivers/light_led.h"
 #include "drivers/serial_usb_vcp.h"
@@ -90,6 +91,7 @@
 #include "flight/mixer.h"
 #include "flight/pid.h"
 #include "flight/servos.h"
+#include "flight/gps_rescue.h"
 
 
 // June 2013     V2.2-dev
@@ -253,6 +255,16 @@ void updateArmingStatus(void)
                 setArmingDisabled(ARMING_DISABLED_NOPREARM);
             }
         }
+
+#ifdef USE_GPS_RESCUE
+        if (isModeActivationConditionPresent(BOXGPSRESCUE)) {
+            if (rescueState.sensor.numSat < gpsRescueConfig()->minSats) {
+                setArmingDisabled(ARMING_DISABLED_GPS);
+            } else {
+                unsetArmingDisabled(ARMING_DISABLED_GPS);
+            }
+        }
+#endif
 
         if (IS_RC_MODE_ACTIVE(BOXPARALYZE) && paralyzeModeAllowed) {
             setArmingDisabled(ARMING_DISABLED_PARALYZE);
@@ -737,6 +749,14 @@ bool processRx(timeUs_t currentTimeUs)
         DISABLE_FLIGHT_MODE(HORIZON_MODE);
     }
 
+    if (IS_RC_MODE_ACTIVE(BOXGPSRESCUE) || (failsafeIsActive() && failsafeConfig()->failsafe_procedure == FAILSAFE_PROCEDURE_GPS_RESCUE)) {
+        if (!FLIGHT_MODE(GPS_RESCUE_MODE)) {
+            ENABLE_FLIGHT_MODE(GPS_RESCUE_MODE);
+        }
+    } else {
+        DISABLE_FLIGHT_MODE(GPS_RESCUE_MODE);
+    }
+
     if (FLIGHT_MODE(ANGLE_MODE) || FLIGHT_MODE(HORIZON_MODE)) {
         LED1_ON;
         // increase frequency of attitude task to reduce drift when in angle or horizon mode
@@ -816,7 +836,7 @@ bool processRx(timeUs_t currentTimeUs)
     return true;
 }
 
-static void subTaskPidController(timeUs_t currentTimeUs)
+static FAST_CODE void subTaskPidController(timeUs_t currentTimeUs)
 {
     uint32_t startTime = 0;
     if (debugMode == DEBUG_PIDLOOP) {startTime = micros();}
@@ -863,11 +883,13 @@ static void subTaskPidController(timeUs_t currentTimeUs)
 
 
 #ifdef USE_PID_AUDIO
-    pidAudioUpdate();
+    if (isModeActivationConditionPresent(BOXPIDAUDIO)) {
+        pidAudioUpdate();
+    }
 #endif
 }
 
-static NOINLINE void subTaskMainSubprocesses(timeUs_t currentTimeUs)
+static FAST_CODE_NOINLINE void subTaskMainSubprocesses(timeUs_t currentTimeUs)
 {
     uint32_t startTime = 0;
     if (debugMode == DEBUG_PIDLOOP) {
@@ -884,28 +906,10 @@ static NOINLINE void subTaskMainSubprocesses(timeUs_t currentTimeUs)
         updateMagHold();
     }
 #endif
-    
-    // If we're armed, at minimum throttle, and we do arming via the
-    // sticks, do not process yaw input from the rx.  We do this so the
-    // motors do not spin up while we are trying to arm or disarm.
-    // Allow yaw control for tricopters if the user wants the servo to move even when unarmed.
-    if (isUsingSticksForArming() && rcData[THROTTLE] <= rxConfig()->mincheck
-#ifndef USE_QUAD_MIXER_ONLY
-#ifdef USE_SERVOS
-                && !((mixerConfig()->mixerMode == MIXER_TRI || mixerConfig()->mixerMode == MIXER_CUSTOM_TRI) && servoConfig()->tri_unarmed_servo)
-#endif
-                && mixerConfig()->mixerMode != MIXER_AIRPLANE
-                && mixerConfig()->mixerMode != MIXER_FLYING_WING
-#endif
-    ) {
-        resetYawAxis();
-    }
 
-    if (throttleCorrectionConfig()->throttle_correction_value && (FLIGHT_MODE(ANGLE_MODE) || FLIGHT_MODE(HORIZON_MODE))) {
-        rcCommand[THROTTLE] += calculateThrottleAngleCorrection(throttleCorrectionConfig()->throttle_correction_value);
-    }
-
-    processRcCommand();
+#ifdef USE_GPS_RESCUE
+    updateGPSRescueState();
+#endif
 
 #ifdef USE_SDCARD
     afatfs_poll();
@@ -930,7 +934,7 @@ static NOINLINE void subTaskMainSubprocesses(timeUs_t currentTimeUs)
     DEBUG_SET(DEBUG_PIDLOOP, 3, micros() - startTime);
 }
 
-static void subTaskMotorUpdate(timeUs_t currentTimeUs)
+static FAST_CODE void subTaskMotorUpdate(timeUs_t currentTimeUs)
 {
     uint32_t startTime = 0;
     if (debugMode == DEBUG_CYCLETIME) {
@@ -958,6 +962,33 @@ static void subTaskMotorUpdate(timeUs_t currentTimeUs)
     DEBUG_SET(DEBUG_PIDLOOP, 2, micros() - startTime);
 }
 
+static FAST_CODE_NOINLINE void subTaskRcCommand(timeUs_t currentTimeUs)
+{
+
+    // If we're armed, at minimum throttle, and we do arming via the
+    // sticks, do not process yaw input from the rx.  We do this so the
+    // motors do not spin up while we are trying to arm or disarm.
+    // Allow yaw control for tricopters if the user wants the servo to move even when unarmed.
+    if (isUsingSticksForArming() && rcData[THROTTLE] <= rxConfig()->mincheck
+#ifndef USE_QUAD_MIXER_ONLY
+#ifdef USE_SERVOS
+                && !((mixerConfig()->mixerMode == MIXER_TRI || mixerConfig()->mixerMode == MIXER_CUSTOM_TRI) && servoConfig()->tri_unarmed_servo)
+#endif
+                && mixerConfig()->mixerMode != MIXER_AIRPLANE
+                && mixerConfig()->mixerMode != MIXER_FLYING_WING
+#endif
+    ) {
+        resetYawAxis();
+    }
+
+    if (throttleCorrectionConfig()->throttle_correction_value && (FLIGHT_MODE(ANGLE_MODE) || FLIGHT_MODE(HORIZON_MODE))) {
+        rcCommand[THROTTLE] += calculateThrottleAngleCorrection(throttleCorrectionConfig()->throttle_correction_value);
+    }
+
+    processRcCommand();
+    UNUSED(currentTimeUs);
+}
+
 // Function for loop trigger
 FAST_CODE void taskMainPidLoop(timeUs_t currentTimeUs)
 {
@@ -976,6 +1007,7 @@ FAST_CODE void taskMainPidLoop(timeUs_t currentTimeUs)
     DEBUG_SET(DEBUG_PIDLOOP, 0, micros() - currentTimeUs);
 
     if (pidUpdateCounter++ % pidConfig()->pid_process_denom == 0) {
+        subTaskRcCommand(currentTimeUs);
         subTaskPidController(currentTimeUs);
         subTaskMotorUpdate(currentTimeUs);
         subTaskMainSubprocesses(currentTimeUs);

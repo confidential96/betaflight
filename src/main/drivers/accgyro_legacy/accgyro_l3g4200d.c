@@ -23,9 +23,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include <platform.h>
+#include "platform.h"
 
-#include "accgyro.h"
+#include "drivers/accgyro/accgyro.h"
 #include "accgyro_l3g4200d.h"
 
 #include "common/maths.h"

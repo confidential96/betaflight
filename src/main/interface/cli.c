@@ -27,7 +27,6 @@
 #include <ctype.h>
 
 #include "platform.h"
-#include "common/time.h"
 
 // FIXME remove this for targets that don't need a CLI.  Perhaps use a no-op macro when USE_CLI is not enabled
 // signal that we're in cli mode
@@ -51,6 +50,7 @@ extern uint8_t __config_end;
 #include "common/color.h"
 #include "common/maths.h"
 #include "common/printf.h"
+#include "common/time.h"
 #include "common/typeconversion.h"
 #include "common/utils.h"
 
@@ -92,11 +92,11 @@ extern uint8_t __config_end;
 #include "fc/rc_controls.h"
 #include "fc/runtime_config.h"
 
-#include "flight/position.h"
 #include "flight/failsafe.h"
 #include "flight/imu.h"
 #include "flight/mixer.h"
 #include "flight/pid.h"
+#include "flight/position.h"
 #include "flight/servos.h"
 
 #include "interface/cli.h"
@@ -126,6 +126,8 @@ extern uint8_t __config_end;
 #include "pg/pinio.h"
 #include "pg/pg.h"
 #include "pg/pg_ids.h"
+#include "pg/rx.h"
+#include "pg/rx_spi.h"
 #include "pg/rx_pwm.h"
 #include "pg/timerio.h"
 #include "pg/usb.h"
@@ -170,7 +172,7 @@ static uint32_t bufferIndex = 0;
 static bool configIsInCopy = false;
 
 static const char* const emptyName = "-";
-static const char* const emptryString = "";
+static const char* const emptyString = "";
 
 #ifndef USE_QUAD_MIXER_ONLY
 // sync this with mixerMode_e
@@ -214,6 +216,42 @@ static const char * const *sensorHardwareNames[] = {
     lookupTableGyroHardware, lookupTableAccHardware, lookupTableBaroHardware, lookupTableMagHardware, lookupTableRangefinderHardware
 };
 #endif // USE_SENSOR_NAMES
+
+static void backupPgConfig(const pgRegistry_t *pg)
+{
+    memcpy(pg->copy, pg->address, pg->size);
+}
+
+static void restorePgConfig(const pgRegistry_t *pg)
+{
+    memcpy(pg->address, pg->copy, pg->size);
+}
+
+static void backupConfigs(void)
+{
+    // make copies of configs to do differencing
+    PG_FOREACH(pg) {
+        backupPgConfig(pg);
+    }
+
+    configIsInCopy = true;
+}
+
+static void restoreConfigs(void)
+{
+    PG_FOREACH(pg) {
+        restorePgConfig(pg);
+    }
+
+    configIsInCopy = false;
+}
+
+static void backupAndResetConfigs(void)
+{
+    backupConfigs();
+    // reset all configs to defaults to do differencing
+    resetConfigs();
+}
 
 static void cliPrint(const char *str)
 {
@@ -265,20 +303,14 @@ static void cliPrintfva(const char *format, va_list va)
     bufWriterFlush(cliWriter);
 }
 
-static void cliPrintLinefva(const char *format, va_list va)
-{
-    tfp_format(cliWriter, cliPutp, format, va);
-    bufWriterFlush(cliWriter);
-    cliPrintLinefeed();
-}
-
 static bool cliDumpPrintLinef(uint8_t dumpMask, bool equalsDefault, const char *format, ...)
 {
     if (!((dumpMask & DO_DIFF) && equalsDefault)) {
         va_list va;
         va_start(va, format);
-        cliPrintLinefva(format, va);
+        cliPrintfva(format, va);
         va_end(va);
+        cliPrintLinefeed();
         return true;
     } else {
         return false;
@@ -297,8 +329,9 @@ static bool cliDefaultPrintLinef(uint8_t dumpMask, bool equalsDefault, const cha
 
         va_list va;
         va_start(va, format);
-        cliPrintLinefva(format, va);
+        cliPrintfva(format, va);
         va_end(va);
+        cliPrintLinefeed();
         return true;
     } else {
         return false;
@@ -318,8 +351,19 @@ static void cliPrintLinef(const char *format, ...)
 {
     va_list va;
     va_start(va, format);
-    cliPrintLinefva(format, va);
+    cliPrintfva(format, va);
     va_end(va);
+    cliPrintLinefeed();
+}
+
+static void cliPrintErrorLinef(const char *format, ...)
+{
+    cliPrint("###ERROR### ");
+    va_list va;
+    va_start(va, format);
+    cliPrintfva(format, va);
+    va_end(va);
+    cliPrintLinefeed();
 }
 
 
@@ -449,7 +493,11 @@ static uint16_t getValueOffset(const clivalue_t *value)
 void *cliGetValuePointer(const clivalue_t *value)
 {
     const pgRegistry_t* rec = pgFind(value->pgn);
-    return CONST_CAST(void *, rec->address + getValueOffset(value));
+    if (configIsInCopy) {
+        return CONST_CAST(void *, rec->copy + getValueOffset(value));
+    } else {
+        return CONST_CAST(void *, rec->address + getValueOffset(value));
+    }
 }
 
 const void *cliGetDefaultPointer(const clivalue_t *value)
@@ -611,12 +659,12 @@ static void cliPrompt(void)
 
 static void cliShowParseError(void)
 {
-    cliPrintLine("Parse error");
+    cliPrintErrorLinef("Parse error");
 }
 
 static void cliShowArgumentRangeError(char *name, int min, int max)
 {
-    cliPrintLinef("%s not between %d and %d", name, min, max);
+    cliPrintErrorLinef("%s not between %d and %d", name, min, max);
 }
 
 static const char *nextArg(const char *currentArg)
@@ -908,6 +956,7 @@ static void printSerial(uint8_t dumpMask, const serialConfig_t *serialConfig, co
 
 static void cliSerial(char *cmdline)
 {
+    const char *format = "serial %d %d %ld %ld %ld %ld";
     if (isEmpty(cmdline)) {
         printSerial(DUMP_MASTER, serialConfig(), NULL);
         return;
@@ -984,6 +1033,16 @@ static void cliSerial(char *cmdline)
     }
 
     memcpy(currentConfig, &portConfig, sizeof(portConfig));
+
+    cliDumpPrintLinef(0, false, format,
+        portConfig.identifier,
+        portConfig.functionMask,
+        baudRates[portConfig.msp_baudrateIndex],
+        baudRates[portConfig.gps_baudrateIndex],
+        baudRates[portConfig.telemetry_baudrateIndex],
+        baudRates[portConfig.blackbox_baudrateIndex]
+        );
+
 }
 
 #ifndef SKIP_SERIAL_PASSTHROUGH
@@ -1159,6 +1218,7 @@ static void printAdjustmentRange(uint8_t dumpMask, const adjustmentRange_t *adju
 
 static void cliAdjustmentRange(char *cmdline)
 {
+    const char *format = "adjrange %u %u %u %u %u %u %u %u %u";
     int i, val = 0;
     const char *ptr;
 
@@ -1210,6 +1270,7 @@ static void cliAdjustmentRange(char *cmdline)
             if (validArgumentCount != 6) {
                 memset(ar, 0, sizeof(adjustmentRange_t));
                 cliShowParseError();
+                return;
             }
 
             // Optional arguments
@@ -1228,6 +1289,18 @@ static void cliAdjustmentRange(char *cmdline)
                 ar->adjustmentScale = val;
                 validArgumentCount++;
             }
+            cliDumpPrintLinef(0, false, format,
+                i,
+                ar->adjustmentIndex,
+                ar->auxChannelIndex,
+                MODE_STEP_TO_CHANNEL_VALUE(ar->range.startStep),
+                MODE_STEP_TO_CHANNEL_VALUE(ar->range.endStep),
+                ar->adjustmentFunction,
+                ar->auxSwitchChannelIndex,
+                ar->adjustmentCenter,
+                ar->adjustmentScale
+            );
+
         } else {
             cliShowArgumentRangeError("index", 0, MAX_ADJUSTMENT_RANGE_COUNT - 1);
         }
@@ -1296,7 +1369,7 @@ static void cliMotorMix(char *cmdline)
             len = strlen(ptr);
             for (uint32_t i = 0; ; i++) {
                 if (mixerNames[i] == NULL) {
-                    cliPrintLine("Invalid name");
+                    cliPrintErrorLinef("Invalid name");
                     break;
                 }
                 if (strncasecmp(ptr, mixerNames[i], len) == 0) {
@@ -1367,6 +1440,7 @@ static void printRxRange(uint8_t dumpMask, const rxChannelRangeConfig_t *channel
 
 static void cliRxRange(char *cmdline)
 {
+    const char *format = "rxrange %u %u %u";
     int i, validArgumentCount = 0;
     const char *ptr;
 
@@ -1400,6 +1474,12 @@ static void cliRxRange(char *cmdline)
                 rxChannelRangeConfig_t *channelRangeConfig = rxChannelRangeConfigsMutable(i);
                 channelRangeConfig->min = rangeMin;
                 channelRangeConfig->max = rangeMax;
+                cliDumpPrintLinef(0, false, format,
+                    i,
+                    channelRangeConfig->min,
+                    channelRangeConfig->max
+                );
+
             }
         } else {
             cliShowArgumentRangeError("channel", 0, NON_AUX_CHANNEL_COUNT - 1);
@@ -1429,6 +1509,8 @@ static void printLed(uint8_t dumpMask, const ledConfig_t *ledConfigs, const ledC
 
 static void cliLed(char *cmdline)
 {
+    const char *format = "led %u %s";
+    char ledConfigBuffer[20];
     int i;
     const char *ptr;
 
@@ -1439,7 +1521,10 @@ static void cliLed(char *cmdline)
         i = atoi(ptr);
         if (i < LED_MAX_STRIP_LENGTH) {
             ptr = nextArg(cmdline);
-            if (!parseLedStripConfig(i, ptr)) {
+            if (parseLedStripConfig(i, ptr)) {
+                generateLedConfig((ledConfig_t *)&ledStripConfig()->ledConfigs[i], ledConfigBuffer, sizeof(ledConfigBuffer));
+                cliDumpPrintLinef(0, false, format, i, ledConfigBuffer);
+            } else {
                 cliShowParseError();
             }
         } else {
@@ -1467,6 +1552,7 @@ static void printColor(uint8_t dumpMask, const hsvColor_t *colors, const hsvColo
 
 static void cliColor(char *cmdline)
 {
+    const char *format = "color %u %d,%u,%u";
     if (isEmpty(cmdline)) {
         printColor(DUMP_MASTER, ledStripConfig()->colors, NULL);
     } else {
@@ -1474,7 +1560,10 @@ static void cliColor(char *cmdline)
         const int i = atoi(ptr);
         if (i < LED_CONFIGURABLE_COLOR_COUNT) {
             ptr = nextArg(cmdline);
-            if (!parseColor(i, ptr)) {
+            if (parseColor(i, ptr)) {
+                const hsvColor_t *color = &ledStripConfig()->colors[i];
+                cliDumpPrintLinef(0, false, format, i, color->h, color->s, color->v);
+            } else {
                 cliShowParseError();
             }
         } else {
@@ -1614,6 +1703,7 @@ static void printServo(uint8_t dumpMask, const servoParam_t *servoParams, const 
 
 static void cliServo(char *cmdline)
 {
+    const char *format = "servo %u %d %d %d %d %d";
     enum { SERVO_ARGUMENT_COUNT = 6 };
     int16_t arguments[SERVO_ARGUMENT_COUNT];
 
@@ -1681,6 +1771,16 @@ static void cliServo(char *cmdline)
         servo->middle = arguments[MIDDLE];
         servo->rate = arguments[RATE];
         servo->forwardFromChannel = arguments[FORWARD];
+
+        cliDumpPrintLinef(0, false, format,
+            i,
+            servo->min,
+            servo->max,
+            servo->middle,
+            servo->rate,
+            servo->forwardFromChannel
+        );
+
     }
 }
 #endif
@@ -1751,7 +1851,7 @@ static void cliServoMix(char *cmdline)
             len = strlen(ptr);
             for (uint32_t i = 0; ; i++) {
                 if (mixerNames[i] == NULL) {
-                    cliPrintLine("Invalid name");
+                    cliPrintErrorLinef("Invalid name");
                     break;
                 }
                 if (strncasecmp(ptr, mixerNames[i], len) == 0) {
@@ -2050,6 +2150,7 @@ static void printVtx(uint8_t dumpMask, const vtxConfig_t *vtxConfig, const vtxCo
 
 static void cliVtx(char *cmdline)
 {
+    const char *format = "vtx %u %u %u %u %u %u";
     int i, val = 0;
     const char *ptr;
 
@@ -2091,6 +2192,16 @@ static void cliVtx(char *cmdline)
 
             if (validArgumentCount != 5) {
                 memset(cac, 0, sizeof(vtxChannelActivationCondition_t));
+                cliShowParseError();
+            } else {
+                cliDumpPrintLinef(0, false, format,
+                    i,
+                    cac->auxChannelIndex,
+                    cac->band,
+                    cac->channel,
+                    MODE_STEP_TO_CHANNEL_VALUE(cac->range.startStep),
+                    MODE_STEP_TO_CHANNEL_VALUE(cac->range.endStep)
+                );
             }
         } else {
             cliShowArgumentRangeError("index", 0, MAX_CHANNEL_ACTIVATION_CONDITION_COUNT - 1);
@@ -2123,14 +2234,14 @@ static void printFeature(uint8_t dumpMask, const featureConfig_t *featureConfig,
     const uint32_t mask = featureConfig->enabledFeatures;
     const uint32_t defaultMask = featureConfigDefault->enabledFeatures;
     for (uint32_t i = 0; featureNames[i]; i++) { // disabled features first
-        if (strcmp(featureNames[i], emptryString) != 0) { //Skip unused
+        if (strcmp(featureNames[i], emptyString) != 0) { //Skip unused
             const char *format = "feature -%s";
             cliDefaultPrintLinef(dumpMask, (defaultMask | ~mask) & (1 << i), format, featureNames[i]);
             cliDumpPrintLinef(dumpMask, (~defaultMask | mask) & (1 << i), format, featureNames[i]);
         }
     }
     for (uint32_t i = 0; featureNames[i]; i++) {  // enabled features
-        if (strcmp(featureNames[i], emptryString) != 0) { //Skip unused
+        if (strcmp(featureNames[i], emptyString) != 0) { //Skip unused
             const char *format = "feature %s";
             if (defaultMask & (1 << i)) {
                 cliDefaultPrintLinef(dumpMask, (~defaultMask | mask) & (1 << i), format, featureNames[i]);
@@ -2161,7 +2272,7 @@ static void cliFeature(char *cmdline)
         for (uint32_t i = 0; ; i++) {
             if (featureNames[i] == NULL)
                 break;
-            if (strcmp(featureNames[i], emptryString) != 0) //Skip unused
+            if (strcmp(featureNames[i], emptyString) != 0) //Skip unused
                 cliPrintf(" %s", featureNames[i]);
         }
         cliPrintLinefeed();
@@ -2177,7 +2288,7 @@ static void cliFeature(char *cmdline)
 
         for (uint32_t i = 0; ; i++) {
             if (featureNames[i] == NULL) {
-                cliPrintLine("Invalid name");
+                cliPrintErrorLinef("Invalid name");
                 break;
             }
 
@@ -2260,7 +2371,7 @@ static void cliBeeper(char *cmdline)
 
         for (uint32_t i = 0; ; i++) {
             if (i == beeperCount) {
-                cliPrintLine("Invalid name");
+                cliPrintErrorLinef("Invalid name");
                 break;
             }
             if (strncasecmp(cmdline, beeperNameForTableIndex(i), len) == 0) {
@@ -2294,10 +2405,10 @@ static void cliBeeper(char *cmdline)
 }
 #endif
 
+#ifdef USE_RX_FRSKY_SPI
 void cliFrSkyBind(char *cmdline){
     UNUSED(cmdline);
-    switch (rxConfig()->rx_spi_protocol) {
-#ifdef USE_RX_FRSKY_SPI
+    switch (rxSpiConfig()->rx_spi_protocol) {
     case RX_SPI_FRSKY_D:
     case RX_SPI_FRSKY_X:
         frSkySpiBind();
@@ -2305,13 +2416,13 @@ void cliFrSkyBind(char *cmdline){
         cliPrint("Binding...");
 
         break;
-#endif
     default:
         cliPrint("Not supported.");
 
         break;
     }
 }
+#endif
 
 static void printMap(uint8_t dumpMask, const rxConfig_t *rxConfig, const rxConfig_t *defaultRxConfig)
 {
@@ -2370,11 +2481,20 @@ static void cliMap(char *cmdline)
     cliPrintLinef("map %s", buf);
 }
 
+static char *skipSpace(char *buffer)
+{
+    while (*(buffer) == ' ') {
+        buffer++;
+    }
+
+    return buffer;
+}
+
 static char *checkCommand(char *cmdLine, const char *command)
 {
     if (!strncasecmp(cmdLine, command, strlen(command))   // command names match
         && (isspace((unsigned)cmdLine[strlen(command)]) || cmdLine[strlen(command)] == 0)) {
-        return cmdLine + strlen(command) + 1;
+        return skipSpace(cmdLine + strlen(command) + 1);
     } else {
         return 0;
     }
@@ -2435,20 +2555,20 @@ static void cliGpsPassthrough(char *cmdline)
 #if defined(USE_GYRO_REGISTER_DUMP) && !defined(SIMULATOR_BUILD)
 static void cliPrintGyroRegisters(uint8_t whichSensor)
 {
-    tfp_printf("# WHO_AM_I    0x%X\r\n", gyroReadRegister(whichSensor, MPU_RA_WHO_AM_I));
-    tfp_printf("# CONFIG      0x%X\r\n", gyroReadRegister(whichSensor, MPU_RA_CONFIG));
-    tfp_printf("# GYRO_CONFIG 0x%X\r\n", gyroReadRegister(whichSensor, MPU_RA_GYRO_CONFIG));
+    cliPrintLinef("# WHO_AM_I    0x%X", gyroReadRegister(whichSensor, MPU_RA_WHO_AM_I));
+    cliPrintLinef("# CONFIG      0x%X", gyroReadRegister(whichSensor, MPU_RA_CONFIG));
+    cliPrintLinef("# GYRO_CONFIG 0x%X", gyroReadRegister(whichSensor, MPU_RA_GYRO_CONFIG));
 }
 
 static void cliDumpGyroRegisters(char *cmdline)
 {
 #ifdef USE_DUAL_GYRO
     if ((gyroConfig()->gyro_to_use == GYRO_CONFIG_USE_GYRO_1) || (gyroConfig()->gyro_to_use == GYRO_CONFIG_USE_GYRO_BOTH)) {
-        tfp_printf("\r\n# Gyro 1\r\n");
+        cliPrintLinef("\r\n# Gyro 1");
         cliPrintGyroRegisters(GYRO_CONFIG_USE_GYRO_1);
     }
     if ((gyroConfig()->gyro_to_use == GYRO_CONFIG_USE_GYRO_2) || (gyroConfig()->gyro_to_use == GYRO_CONFIG_USE_GYRO_BOTH)) {
-        tfp_printf("\r\n# Gyro 2\r\n");
+        cliPrintLinef("\r\n# Gyro 2");
         cliPrintGyroRegisters(GYRO_CONFIG_USE_GYRO_2);
     }
 #else
@@ -2462,11 +2582,11 @@ static void cliDumpGyroRegisters(char *cmdline)
 static int parseOutputIndex(char *pch, bool allowAllEscs) {
     int outputIndex = atoi(pch);
     if ((outputIndex >= 0) && (outputIndex < getMotorCount())) {
-        tfp_printf("Using output %d.\r\n", outputIndex);
+        cliPrintLinef("Using output %d.", outputIndex);
     } else if (allowAllEscs && outputIndex == ALL_MOTORS) {
-        tfp_printf("Using all outputs.\r\n");
+        cliPrintLinef("Using all outputs.");
     } else {
-        tfp_printf("Invalid output number. Range: 0  %d.\r\n", getMotorCount() - 1);
+        cliPrintErrorLinef("Invalid output number. Range: 0  %d.", getMotorCount() - 1);
 
         return -1;
     }
@@ -2637,7 +2757,7 @@ void printEscInfo(const uint8_t *escInfoBuffer, uint8_t bytesRead)
                     }
                 }
             } else {
-                cliPrintLine("Checksum Error.");
+                cliPrintErrorLinef("Checksum Error.");
             }
         }
     }
@@ -2726,7 +2846,7 @@ static void cliDshotProg(char *cmdline)
                         delay(20); // wait for sound output to finish
                     }
                 } else {
-                    cliPrintLinef("Invalid command. Range: 1 - %d.", DSHOT_MIN_THROTTLE - 1);
+                    cliPrintErrorLinef("Invalid command. Range: 1 - %d.", DSHOT_MIN_THROTTLE - 1);
                 }
             }
 
@@ -2818,7 +2938,7 @@ static void cliMixer(char *cmdline)
 
     for (uint32_t i = 0; ; i++) {
         if (mixerNames[i] == NULL) {
-            cliPrintLine("Invalid name");
+            cliPrintErrorLinef("Invalid name");
             return;
         }
         if (strncasecmp(cmdline, mixerNames[i], len) == 0) {
@@ -2902,7 +3022,7 @@ static void cliPlaySound(char *cmdline)
                 if ((name=beeperNameForTableIndex(i)) != NULL)
                     break;   //if name OK then play sound below
                 if (i == lastSoundIdx + 1) {     //prevent infinite loop
-                    cliPrintLine("Error playing sound");
+                    cliPrintErrorLinef("Error playing sound");
                     return;
                 }
             }
@@ -3003,39 +3123,50 @@ static void cliDefaults(char *cmdline)
     }
 }
 
+void cliPrintVarDefault(const clivalue_t *value)
+{
+    const pgRegistry_t *pg = pgFind(value->pgn);
+    if (pg) {
+        const char *defaultFormat = "Default value: ";
+        const int valueOffset = getValueOffset(value);
+        const bool equalsDefault = valuePtrEqualsDefault(value, pg->copy + valueOffset, pg->address + valueOffset);
+        if (!equalsDefault) {
+            cliPrintf(defaultFormat, value->name);
+            printValuePointer(value, (uint8_t*)pg->address + valueOffset, false);
+            cliPrintLinefeed();
+        }
+    }
+}
+
 STATIC_UNIT_TESTED void cliGet(char *cmdline)
 {
     const clivalue_t *val;
     int matchedCommands = 0;
 
+    backupAndResetConfigs();
+
     for (uint32_t i = 0; i < valueTableEntryCount; i++) {
         if (strcasestr(valueTable[i].name, cmdline)) {
             val = &valueTable[i];
+            if (matchedCommands > 0) {
+                cliPrintLinefeed();
+            }
             cliPrintf("%s = ", valueTable[i].name);
             cliPrintVar(val, 0);
             cliPrintLinefeed();
             cliPrintVarRange(val);
-            cliPrintLinefeed();
-
+            cliPrintVarDefault(val);
             matchedCommands++;
         }
     }
 
+    restoreConfigs();
 
     if (matchedCommands) {
         return;
     }
 
-    cliPrintLine("Invalid name");
-}
-
-static char *skipSpace(char *buffer)
-{
-    while (*(buffer) == ' ') {
-        buffer++;
-    }
-
-    return buffer;
+    cliPrintErrorLinef("Invalid name");
 }
 
 static uint8_t getWordLength(char *bufBegin, char *bufEnd)
@@ -3183,14 +3314,14 @@ STATIC_UNIT_TESTED void cliSet(char *cmdline)
                     cliPrintf("%s set to ", val->name);
                     cliPrintVar(val, 0);
                 } else {
-                    cliPrintLine("Invalid value");
+                    cliPrintErrorLinef("Invalid value");
                     cliPrintVarRange(val);
                 }
 
                 return;
             }
         }
-        cliPrintLine("Invalid name");
+        cliPrintErrorLinef("Invalid name");
     } else {
         // no equals, check for matching variables.
         cliGet(cmdline);
@@ -3360,91 +3491,120 @@ static void cliVersion(char *cmdline)
 typedef struct {
     const uint8_t owner;
     pgn_t pgn;
-    uint16_t offset;
+    uint8_t stride;
+    uint8_t offset;
     const uint8_t maxIndex;
 } cliResourceValue_t;
 
+// Handy macros for keeping the table tidy.
+// DEFS : Single entry
+// DEFA : Array of uint8_t (stride = 1)
+// DEFW : Wider stride case; array of structs.
+
+#define DEFS(owner, pgn, type, member) \
+    { owner, pgn, 0, offsetof(type, member), 0 }
+
+#define DEFA(owner, pgn, type, member, max) \
+    { owner, pgn, sizeof(ioTag_t), offsetof(type, member), max }
+
+#define DEFW(owner, pgn, type, member, max) \
+    { owner, pgn, sizeof(type), offsetof(type, member), max }
+
 const cliResourceValue_t resourceTable[] = {
 #ifdef USE_BEEPER
-    { OWNER_BEEPER,        PG_BEEPER_DEV_CONFIG, offsetof(beeperDevConfig_t, ioTag), 0 },
+    DEFS( OWNER_BEEPER,        PG_BEEPER_DEV_CONFIG, beeperDevConfig_t, ioTag) ,
 #endif
-    { OWNER_MOTOR,         PG_MOTOR_CONFIG, offsetof(motorConfig_t, dev.ioTags[0]), MAX_SUPPORTED_MOTORS },
+    DEFA( OWNER_MOTOR,         PG_MOTOR_CONFIG, motorConfig_t, dev.ioTags[0], MAX_SUPPORTED_MOTORS ),
 #ifdef USE_SERVOS
-    { OWNER_SERVO,         PG_SERVO_CONFIG, offsetof(servoConfig_t, dev.ioTags[0]), MAX_SUPPORTED_SERVOS },
+    DEFA( OWNER_SERVO,         PG_SERVO_CONFIG, servoConfig_t, dev.ioTags[0], MAX_SUPPORTED_SERVOS ),
 #endif
 #if defined(USE_PWM) || defined(USE_PPM)
-    { OWNER_PPMINPUT,      PG_PPM_CONFIG, offsetof(ppmConfig_t, ioTag), 0 },
-    { OWNER_PWMINPUT,      PG_PWM_CONFIG, offsetof(pwmConfig_t, ioTags[0]), PWM_INPUT_PORT_COUNT },
+    DEFS( OWNER_PPMINPUT,      PG_PPM_CONFIG, ppmConfig_t, ioTag ),
+    DEFA( OWNER_PWMINPUT,      PG_PWM_CONFIG, pwmConfig_t, ioTags[0], PWM_INPUT_PORT_COUNT ),
 #endif
 #ifdef USE_RANGEFINDER_HCSR04
-    { OWNER_SONAR_TRIGGER, PG_SONAR_CONFIG, offsetof(sonarConfig_t, triggerTag), 0 },
-    { OWNER_SONAR_ECHO,    PG_SONAR_CONFIG, offsetof(sonarConfig_t, echoTag),    0 },
+    DEFS( OWNER_SONAR_TRIGGER, PG_SONAR_CONFIG, sonarConfig_t, triggerTag ),
+    DEFS( OWNER_SONAR_ECHO,    PG_SONAR_CONFIG, sonarConfig_t, echoTag ),
 #endif
 #ifdef USE_LED_STRIP
-    { OWNER_LED_STRIP,     PG_LED_STRIP_CONFIG, offsetof(ledStripConfig_t, ioTag),   0 },
+    DEFS( OWNER_LED_STRIP,     PG_LED_STRIP_CONFIG, ledStripConfig_t, ioTag ),
 #endif
-    { OWNER_SERIAL_TX,     PG_SERIAL_PIN_CONFIG, offsetof(serialPinConfig_t, ioTagTx[0]), SERIAL_PORT_MAX_INDEX },
-    { OWNER_SERIAL_RX,     PG_SERIAL_PIN_CONFIG, offsetof(serialPinConfig_t, ioTagRx[0]), SERIAL_PORT_MAX_INDEX },
+    DEFA( OWNER_SERIAL_TX,     PG_SERIAL_PIN_CONFIG, serialPinConfig_t, ioTagTx[0], SERIAL_PORT_MAX_INDEX ),
+    DEFA( OWNER_SERIAL_RX,     PG_SERIAL_PIN_CONFIG, serialPinConfig_t, ioTagRx[0], SERIAL_PORT_MAX_INDEX ),
 #ifdef USE_INVERTER
-    { OWNER_INVERTER,      PG_SERIAL_PIN_CONFIG, offsetof(serialPinConfig_t, ioTagInverter[0]), SERIAL_PORT_MAX_INDEX },
+    DEFA( OWNER_INVERTER,      PG_SERIAL_PIN_CONFIG, serialPinConfig_t, ioTagInverter[0], SERIAL_PORT_MAX_INDEX ),
 #endif
 #ifdef USE_I2C
-    { OWNER_I2C_SCL,       PG_I2C_CONFIG, offsetof(i2cConfig_t, ioTagScl[0]), I2CDEV_COUNT },
-    { OWNER_I2C_SDA,       PG_I2C_CONFIG, offsetof(i2cConfig_t, ioTagSda[0]), I2CDEV_COUNT },
+    DEFW( OWNER_I2C_SCL,       PG_I2C_CONFIG, i2cConfig_t, ioTagScl, I2CDEV_COUNT ),
+    DEFW( OWNER_I2C_SDA,       PG_I2C_CONFIG, i2cConfig_t, ioTagSda, I2CDEV_COUNT ),
 #endif
-    { OWNER_LED,           PG_STATUS_LED_CONFIG, offsetof(statusLedConfig_t, ioTags[0]), STATUS_LED_NUMBER },
+    DEFA( OWNER_LED,           PG_STATUS_LED_CONFIG, statusLedConfig_t, ioTags[0], STATUS_LED_NUMBER ),
 #ifdef USE_SPEKTRUM_BIND
-    { OWNER_RX_BIND,       PG_RX_CONFIG, offsetof(rxConfig_t, spektrum_bind_pin_override_ioTag), 0 },
-    { OWNER_RX_BIND_PLUG,  PG_RX_CONFIG, offsetof(rxConfig_t, spektrum_bind_plug_ioTag), 0 },
+    DEFS( OWNER_RX_BIND,       PG_RX_CONFIG, rxConfig_t, spektrum_bind_pin_override_ioTag ),
+    DEFS( OWNER_RX_BIND_PLUG,  PG_RX_CONFIG, rxConfig_t, spektrum_bind_plug_ioTag ),
 #endif
 #ifdef USE_TRANSPONDER
-    { OWNER_TRANSPONDER,   PG_TRANSPONDER_CONFIG, offsetof(transponderConfig_t, ioTag), 0 },
+    DEFS( OWNER_TRANSPONDER,   PG_TRANSPONDER_CONFIG, transponderConfig_t, ioTag ),
 #endif
 #ifdef USE_SPI
-    { OWNER_SPI_SCK,       PG_SPI_PIN_CONFIG, offsetof(spiPinConfig_t, ioTagSck[0]), SPIDEV_COUNT },
-    { OWNER_SPI_MISO,      PG_SPI_PIN_CONFIG, offsetof(spiPinConfig_t, ioTagMiso[0]), SPIDEV_COUNT },
-    { OWNER_SPI_MOSI,      PG_SPI_PIN_CONFIG, offsetof(spiPinConfig_t, ioTagMosi[0]), SPIDEV_COUNT },
+    DEFW( OWNER_SPI_SCK,       PG_SPI_PIN_CONFIG, spiPinConfig_t, ioTagSck, SPIDEV_COUNT ),
+    DEFW( OWNER_SPI_MISO,      PG_SPI_PIN_CONFIG, spiPinConfig_t, ioTagMiso, SPIDEV_COUNT ),
+    DEFW( OWNER_SPI_MOSI,      PG_SPI_PIN_CONFIG, spiPinConfig_t, ioTagMosi, SPIDEV_COUNT ),
 #endif
 #ifdef USE_ESCSERIAL
-    { OWNER_ESCSERIAL,     PG_ESCSERIAL_CONFIG, offsetof(escSerialConfig_t, ioTag), 0 },
+    DEFS( OWNER_ESCSERIAL,     PG_ESCSERIAL_CONFIG, escSerialConfig_t, ioTag ),
 #endif
 #ifdef USE_CAMERA_CONTROL
-    { OWNER_CAMERA_CONTROL, PG_CAMERA_CONTROL_CONFIG, offsetof(cameraControlConfig_t, ioTag), 0 },
+    DEFS( OWNER_CAMERA_CONTROL, PG_CAMERA_CONTROL_CONFIG, cameraControlConfig_t, ioTag ),
 #endif
 #ifdef USE_ADC
-    { OWNER_ADC_BATT,      PG_ADC_CONFIG, offsetof(adcConfig_t, vbat.ioTag), 0 },
-    { OWNER_ADC_RSSI,      PG_ADC_CONFIG, offsetof(adcConfig_t, rssi.ioTag), 0 },
-    { OWNER_ADC_CURR,      PG_ADC_CONFIG, offsetof(adcConfig_t, current.ioTag), 0 },
-    { OWNER_ADC_EXT,       PG_ADC_CONFIG, offsetof(adcConfig_t, external1.ioTag), 0 },
+    DEFS( OWNER_ADC_BATT,      PG_ADC_CONFIG, adcConfig_t, vbat.ioTag ),
+    DEFS( OWNER_ADC_RSSI,      PG_ADC_CONFIG, adcConfig_t, rssi.ioTag ),
+    DEFS( OWNER_ADC_CURR,      PG_ADC_CONFIG, adcConfig_t, current.ioTag ),
+    DEFS( OWNER_ADC_EXT,       PG_ADC_CONFIG, adcConfig_t, external1.ioTag ),
 #endif
 #ifdef USE_BARO
-    { OWNER_BARO_CS,       PG_BAROMETER_CONFIG, offsetof(barometerConfig_t, baro_spi_csn), 0 },
+    DEFS( OWNER_BARO_CS,       PG_BAROMETER_CONFIG, barometerConfig_t, baro_spi_csn ),
 #endif
 #ifdef USE_MAG
-    { OWNER_COMPASS_CS,    PG_COMPASS_CONFIG, offsetof(compassConfig_t, mag_spi_csn), 0 },
+    DEFS( OWNER_COMPASS_CS,    PG_COMPASS_CONFIG, compassConfig_t, mag_spi_csn ),
+#ifdef USE_MAG_DATA_READY_SIGNAL
+    DEFS( OWNER_COMPASS_EXTI,  PG_COMPASS_CONFIG, compassConfig_t, interruptTag ),
+#endif
 #endif
 #ifdef USE_SDCARD
-    { OWNER_SDCARD_CS,     PG_SDCARD_CONFIG, offsetof(sdcardConfig_t, chipSelectTag), 0 },
-    { OWNER_SDCARD_DETECT, PG_SDCARD_CONFIG, offsetof(sdcardConfig_t, cardDetectTag), 0 },
+    DEFS( OWNER_SDCARD_CS,     PG_SDCARD_CONFIG, sdcardConfig_t, chipSelectTag ),
+    DEFS( OWNER_SDCARD_DETECT, PG_SDCARD_CONFIG, sdcardConfig_t, cardDetectTag ),
 #endif
 #ifdef USE_PINIO
-    { OWNER_PINIO,         PG_PINIO_CONFIG, offsetof(pinioConfig_t, ioTag), PINIO_COUNT },
+    DEFA( OWNER_PINIO,         PG_PINIO_CONFIG, pinioConfig_t, ioTag, PINIO_COUNT ),
 #endif
 #if defined(USE_USB_MSC)
-    { OWNER_USB_MSC_PIN,   PG_USB_CONFIG, offsetof(usbDev_t, mscButtonPin), 0 },
+    DEFS( OWNER_USB_MSC_PIN,   PG_USB_CONFIG, usbDev_t, mscButtonPin ),
 #endif
 #ifdef USE_FLASH
-    { OWNER_FLASH_CS,      PG_FLASH_CONFIG, offsetof(flashConfig_t, csTag), 0 },
+    DEFS( OWNER_FLASH_CS,      PG_FLASH_CONFIG, flashConfig_t, csTag ),
 #endif
 #ifdef USE_MAX7456
-    { OWNER_OSD_CS,        PG_MAX7456_CONFIG, offsetof(max7456Config_t, csTag), 0 },
+    DEFS( OWNER_OSD_CS,        PG_MAX7456_CONFIG, max7456Config_t, csTag ),
+#endif
+#ifdef USE_SPI
+    DEFA( OWNER_SPI_PREINIT_IPU, PG_SPI_PREINIT_IPU_CONFIG, spiCs_t, csnTag, SPI_PREINIT_IPU_COUNT ),
+    DEFA( OWNER_SPI_PREINIT_OPU, PG_SPI_PREINIT_OPU_CONFIG, spiCs_t, csnTag, SPI_PREINIT_OPU_COUNT ),
+#endif
+#ifdef USE_RX_SPI
+    DEFS( OWNER_RX_SPI_CS,     PG_RX_SPI_CONFIG, rxSpiConfig_t, csnTag ),
 #endif
 };
+
+#undef DEFS
+#undef DEFA
+#undef DEFW
 
 static ioTag_t *getIoTag(const cliResourceValue_t value, uint8_t index)
 {
     const pgRegistry_t* rec = pgFind(value.pgn);
-    return CONST_CAST(ioTag_t *, rec->address + value.offset + index);
+    return CONST_CAST(ioTag_t *, rec->address + value.stride * index + value.offset);
 }
 
 static void printResource(uint8_t dumpMask)
@@ -3463,8 +3623,8 @@ static void printResource(uint8_t dumpMask)
         }
 
         for (int index = 0; index < MAX_RESOURCE_INDEX(resourceTable[i].maxIndex); index++) {
-            const ioTag_t ioTag = *((const ioTag_t *)currentConfig + resourceTable[i].offset + index);
-            const ioTag_t ioTagDefault = *((const ioTag_t *)defaultConfig + resourceTable[i].offset + index);
+            const ioTag_t ioTag = *((const uint8_t *)currentConfig + resourceTable[i].stride * index + resourceTable[i].offset);
+            const ioTag_t ioTagDefault = *((const uint8_t *)defaultConfig + resourceTable[i].stride * index + resourceTable[i].offset);
 
             bool equalsDefault = ioTag == ioTagDefault;
             const char *format = "resource %s %d %c%02d";
@@ -3592,7 +3752,7 @@ static void cliResource(char *cmdline)
     pch = strtok_r(cmdline, " ", &saveptr);
     for (resourceIndex = 0; ; resourceIndex++) {
         if (resourceIndex >= ARRAYLEN(resourceTable)) {
-            cliPrintLine("Invalid");
+            cliPrintErrorLinef("Invalid");
             return;
         }
 
@@ -3743,7 +3903,7 @@ static void cliTimer(char *cmdline)
     }
 
     if (timerIOIndex < 0) {
-        cliPrintLine("Error: out of index");
+        cliPrintErrorLinef("Index out of range.");
         return;
     }
 
@@ -3785,25 +3945,6 @@ error:
 }
 #endif
 
-static void backupConfigs(void)
-{
-    // make copies of configs to do differencing
-    PG_FOREACH(pg) {
-        memcpy(pg->copy, pg->address, pg->size);
-    }
-
-    configIsInCopy = true;
-}
-
-static void restoreConfigs(void)
-{
-    PG_FOREACH(pg) {
-        memcpy(pg->address, pg->copy, pg->size);
-    }
-
-    configIsInCopy = false;
-}
-
 static void printConfig(char *cmdline, bool doDiff)
 {
     uint8_t dumpMask = DUMP_MASTER;
@@ -3823,14 +3964,8 @@ static void printConfig(char *cmdline, bool doDiff)
     if (doDiff) {
         dumpMask = dumpMask | DO_DIFF;
     }
-
-    backupConfigs();
-    // reset all configs to defaults to do differencing
-    resetConfigs();
-
-#if defined(USE_TARGET_CONFIG)
-    targetConfiguration();
-#endif
+    
+    backupAndResetConfigs();
     if (checkCommand(options, "defaults")) {
         dumpMask = dumpMask | SHOW_DEFAULTS;   // add default values as comments for changed values
     }

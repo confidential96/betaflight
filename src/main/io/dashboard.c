@@ -50,6 +50,7 @@
 #include "pg/pg.h"
 #include "pg/pg_ids.h"
 #include "pg/dashboard.h"
+#include "pg/rx.h"
 
 #include "fc/config.h"
 #include "fc/controlrate_profile.h"
@@ -230,6 +231,9 @@ static void updateFailsafeStatus(void)
         break;
     case FAILSAFE_RX_LOSS_RECOVERED:
         failsafeIndicator = 'r';
+        break;
+    case FAILSAFE_GPS_RESCUE:
+        failsafeIndicator = 'G';
         break;
     }
     i2c_OLED_set_xy(bus, SCREEN_CHARACTER_COLUMN_COUNT - 3, 0);

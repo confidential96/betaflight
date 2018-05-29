@@ -22,7 +22,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 
-#include <platform.h>
+#include "platform.h"
 
 #include "build/debug.h"
 
@@ -72,6 +72,8 @@
 #include "io/vtx.h"
 
 #include "msp/msp_serial.h"
+
+#include "pg/rx.h"
 
 #include "rx/rx.h"
 
